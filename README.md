@@ -1,39 +1,25 @@
 # Laboratório Zabbix — gerência de redes
 
-Três notebooks na mesma rede. Em cada um sobe só o contêiner do seu papel: não há máquina virtual. O desenho está em [ambiente-zabbix.md](ambiente-zabbix.md).
+Três notebooks na mesma rede. O Zabbix Server fica instalado no Linux e usa a rede real dessa máquina. Cada Windows só roda o Zabbix Agent. Não há Docker nem máquina virtual. O desenho está em [ambiente-zabbix.md](ambiente-zabbix.md).
 
-Os arquivos trazem `192.168.56.10`, `192.168.56.20` e `192.168.56.30` como endereço de exemplo. No laboratório, cada notebook usa o IPv4 do Wi-Fi ou do cabo.
+| Papel | Notebook | O que anotar |
+| --- | --- | --- |
+| `SERVIDOR` | Linux com Zabbix Server, MySQL e interface web | IPv4 do Wi-Fi ou do cabo |
+| `WINDOWS-01` | primeiro Windows, com o Agent | IPv4 e o Hostname do agente |
+| `WINDOWS-02` | segundo Windows, com o Agent | IPv4 e outro Hostname |
 
-| Papel | IP de exemplo nos arquivos | Diretório | Sobe |
-| --- | --- | --- | --- |
-| `zabbix-server` | `192.168.56.10` | `server/` | MariaDB, Zabbix Server, interface web |
-| `host-linux` | `192.168.56.20` | `agent/` | Zabbix Agent 2 na porta 10050 |
-| `dispositivo-rede` | `192.168.56.30` | `snmp/` | Net-SNMP na porta 161/UDP |
-
-Interface: `http://<IP-do-servidor>:8080`  
+Interface: `http://SERVIDOR`  
 Login inicial: `Admin` / `zabbix`
 
-As senhas do banco, se não houver `.env`, são `zabbixlab` (usuário `zabbix`) e `zabbixlab-root` (root do MariaDB). São senhas de laboratório.
+A senha do banco é `zabbixlab` (usuário `zabbix`). É senha de laboratório. O login da interface não usa essa senha.
 
-## Três notebooks
+## 1. Colocar os três na mesma rede
 
-Cada notebook executa um papel, com Docker. O notebook do Zabbix consulta os outros dois pelo IP da rede em que os três estão ligados.
+Ligue os três no mesmo Wi-Fi ou no mesmo switch. No Linux, antes de instalar:
 
-Neste texto:
-
-| Nome | Notebook | O que anotar |
-| --- | --- | --- |
-| `SERVIDOR` | Zabbix, banco e interface | IPv4 do Wi-Fi ou do cabo |
-| `AGENTE` | host Linux com o Agent 2 | IPv4 do Wi-Fi ou do cabo |
-| `SNMP` | dispositivo de rede | IPv4 do Wi-Fi ou do cabo |
-
-### 1. Colocar os três na mesma rede
-
-Ligue os três no mesmo Wi-Fi ou no mesmo switch. No notebook do Zabbix, antes do Docker:
-
-```text
-ping AGENTE
-ping SNMP
+```bash
+ping WINDOWS-01
+ping WINDOWS-02
 ```
 
 Os dois precisam responder. Se o ping falhar, a coleta também falha. Roteador com isolamento de clientes (AP isolation) e vários hotspots de celular impedem um notebook de falar com o outro. Nesse caso use outra rede, um cabo, ou desligue o isolamento.
@@ -52,165 +38,116 @@ No Linux:
 ip -4 addr show
 ```
 
-Esses endereços substituem `192.168.56.10`, `.20` e `.30`. Se o roteador mudar o IP depois, repita os ajustes dos passos 4 e 7. Um IP fixo, ou uma reserva DHCP no roteador, evita esse retrabalho.
+Se o roteador mudar o IP depois, repita o `Server` do agente e o IP do host na interface. Um IP fixo, ou uma reserva DHCP no roteador, evita esse retrabalho.
 
-### 2. Instalar o Docker em cada notebook
+## 2. Linux — instalar o Zabbix Server
 
-No Windows 10 ou 11: [Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/), com backend WSL2 e contêineres Linux. Abra o Docker Desktop e espere ele ficar em execução.
-
-No Ubuntu: Docker Engine e o plugin Compose.
-
-Nos dois, este comando precisa funcionar:
+Ubuntu 24.04. No Ubuntu 22.04, troque `ubuntu24.04` por `ubuntu22.04` no endereço do pacote e `php8.3-fpm` por `php8.1-fpm`.
 
 ```bash
-docker compose version
+wget https://repo.zabbix.com/zabbix/7.0/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_7.0+ubuntu24.04_all.deb
+sudo dpkg -i zabbix-release_latest_7.0+ubuntu24.04_all.deb
+sudo apt update
+sudo apt install zabbix-server-mysql zabbix-frontend-php zabbix-nginx-conf zabbix-sql-scripts zabbix-agent zabbix-get mysql-server -y
 ```
 
-O notebook do Zabbix precisa de cerca de 4 GB de memória disponíveis para o Docker. Os outros dois funcionam com cerca de 1 GB.
-
-O Zabbix não é instalado no Windows nem com `apt`. Só os contêineres.
-
-### 3. Clonar o repositório nos três
-
-```bash
-git clone https://github.com/brendaevilly/lab-zabbix.git
-cd gerencia-de-redes
-```
-
-Cada notebook sobe apenas o diretório do seu papel.
-
-### 4. Trocar os IPs de exemplo
-
-No notebook do agente, crie `agent/.env` a partir do exemplo e coloque o IP do notebook do Zabbix:
-
-```bash
-cd agent
-cp .env.example .env
-```
-
-`agent/.env`:
+Crie o banco. No `sudo mysql`, uma linha por vez:
 
 ```text
-ZABBIX_SERVER_IP=SERVIDOR
+create database zabbix character set utf8mb4 collate utf8mb4_bin;
+create user zabbix@localhost identified by 'zabbixlab';
+grant all privileges on zabbix.* to zabbix@localhost;
+set global log_bin_trust_function_creators = 1;
+quit;
 ```
 
-No notebook do SNMP, em `snmp/snmpd.conf`, a comunidade só aceita coleta vinda do notebook do Zabbix. Troque o IP no fim da linha `rocommunity`:
+Importe o esquema. Pode levar cerca de um minuto:
+
+```bash
+sudo zcat /usr/share/zabbix-sql-scripts/mysql/server.sql.gz | mysql --default-character-set=utf8mb4 -uzabbix -pzabbixlab zabbix
+sudo mysql -e "set global log_bin_trust_function_creators = 0;"
+```
+
+Em `/etc/zabbix/zabbix_server.conf`, descomente e preencha:
 
 ```text
-rocommunity zabbixlab SERVIDOR -V labview
+DBPassword=zabbixlab
 ```
 
-O arquivo do servidor não leva o IP dos outros notebooks. Esse IP entra só na hora de cadastrar os hosts, no passo 7.
+O pacote do Nginx deixa `listen` e `server_name` comentados em `/etc/zabbix/nginx.conf`. Sem isso a interface não abre. Deixe assim:
 
-### 5. Liberar o firewall
+```text
+listen 80;
+server_name _;
+```
 
-O Docker publica as portas no notebook. O firewall do sistema ainda precisa deixar a coleta entrar.
+O site padrão do Nginx também ocupa a porta 80. Remova esse site e suba os serviços:
 
-No Windows, PowerShell como administrador. Troque `SERVIDOR` pelo IPv4 daquele notebook.
+```bash
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo systemctl restart zabbix-server zabbix-agent nginx php8.3-fpm
+sudo systemctl enable zabbix-server zabbix-agent nginx php8.3-fpm
+```
 
-Notebook do agente:
+Se o UFW estiver ativo:
+
+```bash
+sudo ufw allow 80/tcp
+```
+
+No navegador, abra `http://SERVIDOR` e siga o assistente. No banco: host `localhost`, banco `zabbix`, usuário `zabbix`, senha `zabbixlab`. Depois entre com `Admin` / `zabbix`.
+
+## 3. Cada Windows — instalar o Zabbix Agent
+
+Repita esta seção nos dois notebooks. O Hostname de um não pode ser igual ao do outro. Anote o nome: ele entra igualzinho no host do Zabbix.
+
+Baixe o Agent 7.0 LTS para Windows, amd64, com OpenSSL:
+
+https://cdn.zabbix.com/zabbix/binaries/stable/7.0/latest/zabbix_agent-7.0-latest-windows-amd64-openssl.msi
+
+PowerShell como administrador. Troque `SERVIDOR` pelo IPv4 do Linux e `NOME` pelo Hostname deste notebook (por exemplo `Windows-01` no primeiro e `Windows-02` no segundo):
 
 ```powershell
+msiexec /i zabbix_agent-7.0-latest-windows-amd64-openssl.msi /qn SERVER=SERVIDOR LISTENPORT=10050 SERVERACTIVE=SERVIDOR HOSTNAME=NOME
 New-NetFirewallRule -DisplayName "Zabbix Agent" -Direction Inbound -Protocol TCP -LocalPort 10050 -Action Allow -RemoteAddress SERVIDOR
 New-NetFirewallRule -DisplayName "ICMP Zabbix" -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Allow -RemoteAddress SERVIDOR
+Restart-Service "Zabbix Agent"
 ```
 
-Notebook do SNMP:
+Na instalação pela janela do MSI, os mesmos campos são: Host name = `NOME`, Zabbix server IP/DNS = `SERVIDOR`, Agent listen port = `10050`, ServerActive = `SERVIDOR`.
+
+O serviço fica em execução automática. A configuração fica em `C:\Program Files\Zabbix Agent\zabbix_agentd.conf`. Se o IP do Linux mudar, altere `Server` e `ServerActive` nesse arquivo e rode de novo `Restart-Service "Zabbix Agent"`.
+
+Neste notebook o agente já está instalado: o Hostname é `BRENDA`, a porta é `10050` e o `Server` aceita a rede `10.0.0.0/24`. No Zabbix, o host dessa máquina usa esse nome e o IPv4 do Wi-Fi dela. Os outros Windows seguem o comando acima, cada um com o próprio Hostname.
+
+Confira neste notebook:
 
 ```powershell
-New-NetFirewallRule -DisplayName "SNMP Zabbix" -Direction Inbound -Protocol UDP -LocalPort 161 -Action Allow -RemoteAddress SERVIDOR
-New-NetFirewallRule -DisplayName "ICMP Zabbix" -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Allow -RemoteAddress SERVIDOR
+Get-Service "Zabbix Agent"
 ```
 
-Notebook do Zabbix, para abrir a interface a partir de outro computador:
+O status precisa ser `Running`.
 
-```powershell
-New-NetFirewallRule -DisplayName "Zabbix Web" -Direction Inbound -Protocol TCP -LocalPort 8080 -Action Allow
-```
+## 4. Cadastrar os dois hosts
 
-No próprio notebook do Zabbix a interface também abre em `http://localhost:8080`.
+Na interface (`http://SERVIDOR`, `Admin` / `zabbix`), para cada Windows:
 
-Se a subida do SNMP disser que a porta 161 já está em uso, desative o recurso "Servidor SNMP" do Windows. Ele ocupa a mesma porta no notebook.
+1. **Data collection** → **Hosts** → **Create host**.
+2. **Host name:** o mesmo `NOME` do agente.
+3. **Templates:** `Windows by Zabbix agent`.
+4. **Host groups:** um grupo, por exemplo `Dispositivos`.
+5. **Interfaces:** **Add** → **Agent**. Apague `127.0.0.1` e coloque o IPv4 deste Windows. Porta `10050`.
+6. **Add**.
 
-No Ubuntu, com UFW ativo, a partir do IP do servidor:
+Em um ou dois minutos, o quadradinho **ZBX** na coluna Availability fica verde. CPU, memória, disco e rede passam a ser coletados. Repita com o segundo Hostname e o segundo IPv4.
+
+## 5. Conferir a partir do Linux
 
 ```bash
-sudo ufw allow from SERVIDOR to any port 10050 proto tcp
-sudo ufw allow from SERVIDOR to any port 161 proto udp
-sudo ufw allow proto icmp from SERVIDOR
-```
-
-No notebook do Zabbix:
-
-```bash
-sudo ufw allow 8080/tcp
-```
-
-### 6. Subir os contêineres
-
-No notebook do Zabbix:
-
-```bash
-cd server
-docker compose up -d
-```
-
-A primeira subida importa o esquema. A interface abre depois que `zabbix-server` passa no healthcheck. Acompanhe com `docker compose ps` e `docker compose logs -f zabbix-server`.
-
-No notebook do agente, depois de gravar o `.env`:
-
-```bash
-cd agent
-docker compose up -d
-```
-
-No notebook do SNMP, depois de gravar o `snmpd.conf`:
-
-```bash
-cd snmp
-docker compose up -d --build
-```
-
-Se o `snmpd.conf` for editado com o contêiner já no ar, reinicie para o `snmpd` reler o arquivo:
-
-```bash
-docker compose restart
-```
-
-O `snmpd` escuta na porta 1161 dentro do contêiner. O Docker publica essa porta como **161** no notebook, que é a porta cadastrada no Zabbix.
-
-### 7. Cadastrar os dois hosts
-
-No notebook do Zabbix, com a interface no ar e os outros dois contêineres respondendo:
-
-```bash
-cd server
-HOST_LINUX_IP=AGENTE SNMP_IP=SNMP bash cadastrar-hosts.sh
-```
-
-No Windows PowerShell, na mesma pasta `server`:
-
-```powershell
-$env:HOST_LINUX_IP = "AGENTE"
-$env:SNMP_IP = "SNMP"
-bash cadastrar-hosts.sh
-```
-
-O script cria os grupos `Laboratorio/Linux` e `Laboratorio/Rede` e vincula os templates **Linux by Zabbix agent**, **Network Generic Device by SNMP** e **ICMP Ping**. Rodar de novo não duplica os hosts.
-
-### 8. Conferir a partir do notebook do Zabbix
-
-```bash
-cd server
-docker compose exec zabbix-server zabbix_get -s AGENTE -k agent.ping
+zabbix_get -s WINDOWS-01 -k agent.ping
+zabbix_get -s WINDOWS-02 -k agent.ping
 ```
 
 A resposta esperada é `1`.
 
-```bash
-docker run --rm alpine:3.22 sh -c "apk add --no-cache net-snmp-tools >/dev/null && snmpget -v2c -c zabbixlab SNMP 1.3.6.1.2.1.1.5.0"
-```
-
-A resposta esperada traz `dispositivo-rede`. O contêiner sai pelo IP do notebook, que é o endereço autorizado na comunidade `zabbixlab`.
-
-Os problemas de disponibilidade aparecem em **Monitoring → Problems**. Parar o contêiner no notebook do dispositivo derruba o agente ou o SNMP e mantém o ping da máquina. Desligar o notebook derruba os dois.
+Os problemas de disponibilidade aparecem em **Monitoring → Problems**. Parar o serviço `Zabbix Agent` derruba a coleta e mantém o ping da máquina. Desligar o notebook derruba os dois.
